@@ -1,10 +1,10 @@
 import sqlite3
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from todo.exceptions import TaskNotFound
-from todo.task import Task
+from todo.task import Priority, Task
 
 
 class TaskRepository(ABC):
@@ -15,7 +15,10 @@ class TaskRepository(ABC):
     def get_all(self) -> list[Task]: ...
 
     @abstractmethod
-    def add(self, title: str) -> Task: ...
+    def add(self, title: str, due_date: date | None = None, priority: Priority = Priority.NORMAL) -> Task: ...
+
+    @abstractmethod
+    def edit(self, task_id: int, title: str) -> None: ...
 
     @abstractmethod
     def mark_done(self, task_id: int) -> None: ...
@@ -42,7 +45,9 @@ class SQLiteTaskRepository(TaskRepository):
     @staticmethod
     def _register_adapters() -> None:
         sqlite3.register_adapter(datetime, lambda dt: dt.isoformat())
+        sqlite3.register_adapter(date, lambda d: d.isoformat())
         sqlite3.register_converter("TIMESTAMP", lambda b: datetime.fromisoformat(b.decode()))
+        sqlite3.register_converter("DATE", lambda b: date.fromisoformat(b.decode()))
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, detect_types=sqlite3.PARSE_DECLTYPES)
@@ -65,13 +70,20 @@ class SQLiteTaskRepository(TaskRepository):
             rows = conn.execute("SELECT * FROM tasks").fetchall()
         return [Task(**row) for row in rows]
 
-    def add(self, title: str) -> Task:
+    def add(self, title: str, due_date: date | None = None, priority: Priority = Priority.NORMAL) -> Task:
         now = datetime.now(timezone.utc)
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO tasks (title, created_at) VALUES (?, ?)", (title, now)
+                "INSERT INTO tasks (title, created_at, due_date, priority) VALUES (?, ?, ?, ?)",
+                (title, now, due_date, priority),
             )
-        return Task(id=cursor.lastrowid, title=title, created_at=now)
+        return Task(id=cursor.lastrowid, title=title, created_at=now, due_date=due_date, priority=priority)
+
+    def edit(self, task_id: int, title: str) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
+            if cursor.rowcount == 0:
+                raise TaskNotFound(task_id)
 
     def mark_done(self, task_id: int) -> None:
         with self._connect() as conn:
