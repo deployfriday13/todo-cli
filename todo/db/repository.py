@@ -1,85 +1,109 @@
 import sqlite3
+from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 
+from todo.exceptions import TaskNotFound
 from todo.task import Task
 
-sqlite3.register_adapter(datetime, lambda dt: dt.isoformat())
-sqlite3.register_converter("TIMESTAMP", lambda b: datetime.fromisoformat(b.decode()))
+
+class TaskRepository(ABC):
+    @abstractmethod
+    def get_pending(self) -> list[Task]: ...
+
+    @abstractmethod
+    def get_all(self) -> list[Task]: ...
+
+    @abstractmethod
+    def add(self, title: str) -> Task: ...
+
+    @abstractmethod
+    def mark_done(self, task_id: int) -> None: ...
+
+    @abstractmethod
+    def mark_undo(self, task_id: int) -> None: ...
+
+    @abstractmethod
+    def delete(self, task_id: int) -> None: ...
+
+    @abstractmethod
+    def delete_completed(self) -> None: ...
+
+    @abstractmethod
+    def search(self, query: str) -> list[Task]: ...
 
 
-class TaskRepository:
+class SQLiteTaskRepository(TaskRepository):
     def __init__(self, db_path: str) -> None:
-        self.db_path = db_path
+        self._db_path = db_path
+        self._register_adapters()
+        self._init_db()
+
+    @staticmethod
+    def _register_adapters() -> None:
+        sqlite3.register_adapter(datetime, lambda dt: dt.isoformat())
+        sqlite3.register_converter("TIMESTAMP", lambda b: datetime.fromisoformat(b.decode()))
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+        conn = sqlite3.connect(self._db_path, detect_types=sqlite3.PARSE_DECLTYPES)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
-    def _init_db(self):
-        sql_path = Path(__file__).parent / "schema.sql"
-        with open(sql_path) as f:
-            stmt = f.read()
+    def _init_db(self) -> None:
+        sql = (Path(__file__).parent / "schema.sql").read_text()
         with self._connect() as conn:
-            conn.executescript(stmt)
+            conn.executescript(sql)
 
     def get_pending(self) -> list[Task]:
-        query = "SELECT * FROM tasks WHERE completed=0"
         with self._connect() as conn:
-            raw = conn.execute(query)
-
-        return [Task(**task) for task in raw]
+            rows = conn.execute("SELECT * FROM tasks WHERE completed=0").fetchall()
+        return [Task(**row) for row in rows]
 
     def get_all(self) -> list[Task]:
-        query = "SELECT * FROM tasks"
         with self._connect() as conn:
-            raw = conn.execute(query)
-
-        return [Task(**task) for task in raw]
+            rows = conn.execute("SELECT * FROM tasks").fetchall()
+        return [Task(**row) for row in rows]
 
     def add(self, title: str) -> Task:
-        stmt = "INSERT INTO tasks (title, created_at) VALUES (?, ?)"
         now = datetime.now(timezone.utc)
-
         with self._connect() as conn:
-            cursor = conn.execute(stmt, (title, now))
-        return Task(id=cursor.lastrowid, title=title, created_at=datetime.now())
+            cursor = conn.execute(
+                "INSERT INTO tasks (title, created_at) VALUES (?, ?)", (title, now)
+            )
+        return Task(id=cursor.lastrowid, title=title, created_at=now)
 
     def mark_done(self, task_id: int) -> None:
-        stmt = "UPDATE tasks SET completed=?, completed_at=? WHERE id = (?)"
-        now = datetime.now(timezone.utc)
-
         with self._connect() as conn:
-            conn.execute(stmt, (True, now, task_id))
+            cursor = conn.execute(
+                "UPDATE tasks SET completed=1, completed_at=? WHERE id=?",
+                (datetime.now(timezone.utc), task_id),
+            )
+            if cursor.rowcount == 0:
+                raise TaskNotFound(task_id)
 
     def mark_undo(self, task_id: int) -> None:
-        stmt = "UPDATE tasks SET completed=?, completed_at=? WHERE id = (?)"
-
         with self._connect() as conn:
-            conn.execute(stmt, (False, None, task_id))
+            cursor = conn.execute(
+                "UPDATE tasks SET completed=0, completed_at=NULL WHERE id=?",
+                (task_id,),
+            )
+            if cursor.rowcount == 0:
+                raise TaskNotFound(task_id)
 
     def delete(self, task_id: int) -> None:
-        stmt = "DELETE FROM tasks WHERE id=?"
         with self._connect() as conn:
-            conn.execute(stmt, (task_id,))
+            cursor = conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+            if cursor.rowcount == 0:
+                raise TaskNotFound(task_id)
 
     def delete_completed(self) -> None:
-        stmt = "DELETE FROM tasks WHERE completed=1"
         with self._connect() as conn:
-            conn.execute(stmt)
+            conn.execute("DELETE FROM tasks WHERE completed=1")
 
     def search(self, query: str) -> list[Task]:
-        stmt = "SELECT * FROM tasks WHERE title LIKE ?"
         with self._connect() as conn:
-            raw = conn.execute(stmt, (f"%{query}%",))
-
-        return [Task(**task) for task in raw]
-
-
-tr = TaskRepository("./todo.db")
-tr.add("Купить корм мурзику")
-task = tr.search("корм")
-
-print(task)
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE title LIKE ?", (f"%{query}%",)
+            ).fetchall()
+        return [Task(**row) for row in rows]
