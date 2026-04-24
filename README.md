@@ -61,3 +61,7 @@ Pending tasks are listed first, sorted by priority then due date. Completed task
 - **Dim** — low priority
 - **Red** — overdue
 - **Dim + strikethrough** — completed
+
+## License
+
+[MIT LICENSE](LICENSE)
